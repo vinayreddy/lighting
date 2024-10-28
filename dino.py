@@ -38,7 +38,12 @@ class UnifiEventReader:
       "/home/vinayreddy/DinoSounds/trex_2.mp3",
       "/home/vinayreddy/DinoSounds/trex_3.mp3"
     ]
+    self.growlFile = "/home/vinayreddy/DinoSounds/growl.mp3"
     self.curSoundIndex = 0  # Initialize index for round-robin
+    self.dinoRoarRunning = False
+    self.dinoGrowlRunning = False
+    self.growlCooldown = False
+    self.growlCooldownSecs = 10
 
   async def initialize(self):
     self.protect = ProtectApiClient(HOST, PORT, USERNAME, PASSWORD, verify_ssl=False)
@@ -52,30 +57,51 @@ class UnifiEventReader:
     if not isinstance(event.new_obj, Camera):
       return
     cam = event.new_obj
-    if cam.mac != "D021F991060D":  # G3 Instant
-      return
-    if cam.is_motion_detected:
+    if cam.mac == "D021F991060D":  # G3 Instant
+      if cam.is_motion_detected:
+        if self.cooldown:
+          print("In cooldown, ignoring motion event...")
+          return
+        # If the dino is in growl mode, starting a 2nd playMp3() will kill the first one.
+        print("Motion detected. Triggering dino actions...")
+        asyncio.create_task(self.dinoRoar())  # Schedule dinoActions asynchronously
+    elif cam.mac == "70A7410F85AC":
       if self.cooldown:
         print("In cooldown, ignoring motion event...")
         return
-      print("Motion detected. Triggering dino actions...")
-      asyncio.create_task(self.dinoActions())  # Schedule dinoActions asynchronously
-      self.cooldown = True
-      asyncio.create_task(self.resetCooldown())  # Schedule cooldown reset
-    if (not cam.is_motion_detected) and (not cam.is_smart_detected):
-      return
+      if cam.is_motion_detected:
+        print("Motion detected on G4. Play growl")
+        asyncio.create_task(self.dinoGrowl())
+        asyncio.create_task(self.resetCooldown())  # Schedule cooldown reset
 
-  async def dinoActions(self):
-    if not self.dmxController.syncLightToAudio():
-      print("Action already running... Skipping")
+  async def dinoGrowl(self):
+    if self.dinoRoarRunning or self.dinoGrowlRunning:
+      print("Growl/Roar already running... Skipping growl")
+      return
+    if self.cooldown or self.growlCooldown:
+      print("Growl/Roar cooldown active... Skipping growl")
+      return
+    self.dinoGrowlRunning = True
+    self.dmxController.syncLightToAudio()
+    await playMp3(fname=self.growlFile)
+    self.dmxController.stopLightToAudioSync()
+    self.dinoGrowlRunning = False
+    self.growlCooldown = True
+    asyncio.create_task(self.resetGrowlCooldown())
+
+  async def dinoRoar(self):
+    if self.dinoRoarRunning:
+      print("Dino roar already running... Skipping dino sound")
       return
     print("Kicking off dino sound...")
-    # Play the current sound file
+    self.dinoRoarRunning = True
+    self.dmxController.syncLightToAudio()
     await playMp3(fname=self.soundFiles[self.curSoundIndex])
-    # Update the index for the next iteration of this method.
     self.curSoundIndex = (self.curSoundIndex + 1) % len(self.soundFiles)
-
     self.dmxController.stopLightToAudioSync()
+    self.dinoRoarRunning = False
+    self.cooldown = True
+    asyncio.create_task(self.resetCooldown())  # Schedule cooldown reset
 
   async def wsStateCb(self, state):
     self.wsUnsub()
@@ -96,6 +122,10 @@ class UnifiEventReader:
   async def resetCooldown(self):
     await asyncio.sleep(self.cooldownSecs)
     self.cooldown = False  # Reset cooldown flag
+
+  async def resetGrowlCooldown(self):
+    await asyncio.sleep(self.growlCooldownSecs)
+    self.growlCooldown = False  # Reset cooldown flag
 
 async def main():
   print(f"Serial number: {FLAGS.serial_number}")

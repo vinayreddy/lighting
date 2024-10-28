@@ -36,7 +36,10 @@ class DmxController:
     print("DMX Device Addr: %s" % serialPort)
     self.dmx = DMXEnttecPro.Controller(port_string=serialPort, baudrate=baudRate)
     self.dmx.clear_channels()
-    self.syncLightsToAudio = False
+    # Use an integer to avoid race conditions when a higher priority player
+    # cancels a lower priority one. The lower priority player might "stop sync"
+    # as part of cleanup.
+    self.syncLightsToAudio = 0
     self.lock = threading.Lock()
 
   # Start the lighting loop in a separate thread
@@ -55,16 +58,31 @@ class DmxController:
     self.dmx.set_channel(startChannel+5, 0)
     self.dmx.submit()
 
+  def setAmbientLight(self):
+    curHour = time.localtime().tm_hour
+    ambientOff = False
+    # Turn off ambient light from 8 to 4.
+    if (curHour >= 3 and curHour <= 5) or (curHour >= 8 and curHour <= 15):
+      ambientOff = True
+
+    # Only set ambient light if not during daytime
+    if ambientOff:
+      self.dmx.set_channel(6, 0)
+      self.dmx.submit()
+    else:
+      self.dmx.set_channel(6, 150)
+      self.dmx.submit()
+
   def lightingLoop(self):
     # Start with a basic slow color cycle.
-    self.dmx.set_channel(6, 150)
-    self.dmx.submit()
     while True:
       p = None
       stream = None
+      self.setAmbientLight()
+
       while True:
         with self.lock:
-          if not self.syncLightsToAudio:
+          if self.syncLightsToAudio <= 0:
             break
         if p is None:
           with noalsaerr():
@@ -76,14 +94,13 @@ class DmxController:
         self.setLight(brightness, r, g, b)
 
       if p is not None:
-        print("Changing colors relatively fast")
-        self.dmx.set_channel(6, 150)
-        self.dmx.submit()
+        print("Reverting to ambient light after audio sync...")
+        self.setAmbientLight()
         stream.stop_stream()
         stream.close()
         p.terminate()
       time.sleep(0.1)
-  
+
 
   def analyzeAudio(self, stream):
     data = np.frombuffer(stream.read(CHUNK), dtype=np.int16)
@@ -117,14 +134,11 @@ class DmxController:
   ''' Returns False if already running. Otherwise, start sync and return True'''
   def syncLightToAudio(self):
     with self.lock:
-      if self.syncLightsToAudio:
-        return False
-      self.syncLightsToAudio = True
-      return True
+      self.syncLightsToAudio += 1
 
   def stopLightToAudioSync(self):
     with self.lock:
-      self.syncLightsToAudio = False
+      self.syncLightsToAudio -= 1
 
 
 def setColor(dmx, startChannel, dim, r, g, b, w):
